@@ -37,11 +37,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -66,6 +69,8 @@ import com.squads.app.ui.components.UnreadBadge
 import com.squads.app.ui.theme.BottomNavHeight
 import com.squads.app.viewmodel.MailViewModel
 import okhttp3.OkHttpClient
+import java.io.ByteArrayInputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun MailScreen(
@@ -296,8 +301,34 @@ fun MailDetailScreen(
                     }
                 }
                 else -> {
+                    // Remote content is blocked by default (tracking pixels leak IP/open time).
+                    // The opt-in is per view only and resets when another mail is opened.
+                    var allowRemoteImages by remember(mail.id) { mutableStateOf(false) }
+                    val showRemoteImagesChip =
+                        remember(mail.body) { hasRemoteImages(mail.body) }
+                    if (showRemoteImagesChip && !allowRemoteImages) {
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Remote images are blocked",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { allowRemoteImages = true }) {
+                                Text("Show remote images")
+                            }
+                        }
+                        HorizontalDivider()
+                    }
                     MailBodyWebView(
                         html = mail.body,
+                        allowRemoteImages = allowRemoteImages,
                         httpClient = httpClient,
                         authToken = authToken,
                         modifier = Modifier.fillMaxSize(),
@@ -312,9 +343,13 @@ fun MailDetailScreen(
 private fun MailBodyWebView(
     html: String,
     modifier: Modifier = Modifier,
+    allowRemoteImages: Boolean = false,
     httpClient: OkHttpClient? = null,
     authToken: String? = null,
 ) {
+    // Read from WebView's background thread in shouldInterceptRequest, so hold it in an atomic
+    // that the update block keeps in sync (the client object is created once in factory).
+    val remoteAllowed = remember { AtomicBoolean(allowRemoteImages) }
     val textColor = MaterialTheme.colorScheme.onBackground
     val bgColor = MaterialTheme.colorScheme.background
     val linkColor = MaterialTheme.colorScheme.primary
@@ -382,11 +417,20 @@ private fun MailBodyWebView(
                             view: WebView?,
                             request: WebResourceRequest?,
                         ): WebResourceResponse? {
-                            val url = request?.url?.toString() ?: return null
+                            val uri = request?.url ?: return null
+                            val url = uri.toString()
+                            // Only attach the Graph token to https://graph.microsoft.com (exact host).
+                            if (!isGraphImageUrl(url)) {
+                                val isRemote = uri.scheme?.lowercase() in REMOTE_SCHEMES
+                                // Block remote loads (tracking pixels) unless the user opted in.
+                                return if (isRemote && !remoteAllowed.get()) {
+                                    blockedResponse()
+                                } else {
+                                    null
+                                }
+                            }
                             val client = httpClient ?: return null
                             val token = authToken ?: return null
-                            // Only attach the Graph token to https://graph.microsoft.com (exact host).
-                            if (!isGraphImageUrl(url)) return null
                             return try {
                                 val okhttpRequest =
                                     okhttp3.Request
@@ -406,13 +450,15 @@ private fun MailBodyWebView(
                             }
                         }
                     }
-                loadDataWithBaseURL(null, styledHtml, "text/html", "UTF-8", null)
+                // The initial load happens in update, which always runs after factory.
             }
         },
         update = { webView ->
             webView.setBackgroundColor(bgArgb)
-            if (webView.tag != styledHtml) {
-                webView.tag = styledHtml
+            val loadKey = styledHtml to allowRemoteImages
+            if (webView.tag != loadKey) {
+                webView.tag = loadKey
+                remoteAllowed.set(allowRemoteImages)
                 webView.loadDataWithBaseURL(null, styledHtml, "text/html", "UTF-8", null)
             }
         },
@@ -420,6 +466,12 @@ private fun MailBodyWebView(
         modifier = modifier,
     )
 }
+
+private val REMOTE_SCHEMES = setOf("http", "https")
+
+/** Empty response that stands in for a blocked remote resource without hitting the network. */
+private fun blockedResponse(): WebResourceResponse =
+    WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
 
 private fun Color.toHex(): String = String.format("#%06X", toArgb() and 0xFFFFFF)
 

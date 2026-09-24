@@ -18,6 +18,21 @@ internal fun isGraphImageUrl(url: String): Boolean {
     return parsed.isHttps && parsed.host.lowercase() == GRAPH_HOST
 }
 
+/**
+ * Matches an http(s) URL in a `src` attribute (quoted or unquoted). Deliberately simple: it is
+ * only used to decide whether to offer the "Show remote images" opt-in, not to enforce blocking.
+ */
+private val REMOTE_SRC_REGEX =
+    Regex("""\bsrc\s*=\s*["']?\s*(https?://[^"'\s>]+)""", RegexOption.IGNORE_CASE)
+
+/**
+ * Returns true when [html] references at least one remote http(s) resource via a `src`
+ * attribute that is not a Graph URL (those load through the authenticated Graph path anyway).
+ * Inline `data:` and `cid:` sources do not count.
+ */
+internal fun hasRemoteImages(html: String): Boolean =
+    REMOTE_SRC_REGEX.findAll(html).any { !isGraphImageUrl(it.groupValues[1]) }
+
 /** Returns true when a link tapped in an email body may be handed off to an external app. */
 internal fun isAllowedExternalLinkScheme(scheme: String?): Boolean =
     scheme?.lowercase() in EXTERNAL_LINK_SCHEMES
