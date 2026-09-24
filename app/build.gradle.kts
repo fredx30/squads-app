@@ -8,6 +8,35 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// Release signing. Values come from the environment first (CI), then local.properties.
+// Blank values count as unset: GitHub Actions passes "" for a missing secret.
+// Nothing here throws at configuration time, so debug builds, unit tests, ktlint and
+// IDE sync keep working without a keystore; release packaging fails instead (see
+// verifyReleaseSigning below the android block).
+val releaseKeystore = file("release.keystore")
+val localProperties =
+    Properties().apply {
+        val localPropsFile = rootProject.file("local.properties")
+        if (localPropsFile.exists()) localPropsFile.inputStream().use { load(it) }
+    }
+
+fun signingValue(name: String): String? =
+    System.getenv(name)?.takeIf { it.isNotBlank() }
+        ?: localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+
+val releaseStorePassword = signingValue("KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("KEY_ALIAS")
+val releaseKeyPassword = signingValue("KEY_PASSWORD")
+
+val releaseSigningProblems: List<String> =
+    buildList {
+        if (!releaseKeystore.exists()) add("keystore file not found at ${releaseKeystore.path}")
+        if (releaseStorePassword == null) add("KEYSTORE_PASSWORD is not set")
+        if (releaseKeyAlias == null) add("KEY_ALIAS is not set")
+        if (releaseKeyPassword == null) add("KEY_PASSWORD is not set")
+    }
+val isReleaseSigningConfigured = releaseSigningProblems.isEmpty()
+
 android {
     namespace = "com.squads.app"
     compileSdk = 36
@@ -23,26 +52,20 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            val keystoreFile = file("release.keystore")
-            if (keystoreFile.exists()) {
-                val props = Properties()
-                val localProps = rootProject.file("local.properties")
-                if (localProps.exists()) props.load(localProps.inputStream())
-                storeFile = keystoreFile
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: props.getProperty("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS") ?: props.getProperty("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD") ?: props.getProperty("KEY_PASSWORD")
+        if (isReleaseSigningConfigured) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         debug {
+            // Always the default debug keystore: the .dev app never carries the production signer.
             applicationIdSuffix = ".dev"
-            if (file("release.keystore").exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
         }
         release {
             isMinifyEnabled = true
@@ -51,12 +74,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig =
-                if (file("release.keystore").exists()) {
-                    signingConfigs.getByName("release")
-                } else {
-                    signingConfigs.getByName("debug")
-                }
+            // No debug-key fallback. Without a complete release config the variant stays
+            // unsigned and verifyReleaseSigning fails release packaging with a clear message.
+            if (isReleaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -75,6 +97,32 @@ android {
             it.useJUnitPlatform()
         }
     }
+}
+
+// Fails release packaging (assembleRelease / bundleRelease) when signing is incomplete,
+// instead of producing an unsigned or debug-signed "release". The message is computed at
+// configuration time so the task action captures only a String (configuration-cache safe).
+val verifyReleaseSigning =
+    tasks.register("verifyReleaseSigning") {
+        group = "verification"
+        description = "Fails if the release signing config is incomplete"
+        val failureMessage: String? =
+            if (isReleaseSigningConfigured) {
+                null
+            } else {
+                "Release signing is not configured:\n" +
+                    releaseSigningProblems.joinToString("\n") { "  - $it" } +
+                    "\nProvide app/release.keystore and set KEYSTORE_PASSWORD, KEY_ALIAS and " +
+                    "KEY_PASSWORD as environment variables or in local.properties."
+            }
+        doFirst {
+            if (failureMessage != null) throw GradleException(failureMessage)
+        }
+    }
+
+val releasePackagingTasks = setOf("packageRelease", "packageReleaseBundle", "signReleaseBundle")
+tasks.configureEach {
+    if (name in releasePackagingTasks) dependsOn(verifyReleaseSigning)
 }
 
 dependencies {
