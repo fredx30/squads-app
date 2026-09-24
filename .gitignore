@@ -27,3 +27,9 @@ promo.png
 promo_hires.png
 promo_github.png
 scripts/
+
+# Local Docker build: corporate CA certs, signing env, and build output
+docker/certs/*
+!docker/certs/.gitkeep
+docker/release.env
+/dist/

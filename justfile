@@ -102,3 +102,25 @@ ship version:
     git commit -m "bump version to {{version}}"
     git tag "v{{version}}"
     git push && git push origin "v{{version}}"
+
+# ─── Docker build (matches the GitHub release workflow) ──────
+
+# Build the release APK in Docker -> dist/app-release.apk
+docker-release:
+    pwsh -NoProfile -File docker/build-apk.ps1
+
+# Build the debug APK in Docker -> dist/app-debug.apk
+docker-debug:
+    pwsh -NoProfile -File docker/build-apk.ps1 -Variant debug
+
+# Rebuild the build image (after changing docker/ or adding certs)
+docker-image:
+    pwsh -NoProfile -File docker/build-apk.ps1 -Rebuild
+
+# Install dist/app-<variant>.apk on the emulator (boots/creates it if needed) and launch
+emulator-run variant="release":
+    pwsh -NoProfile -File docker/run-in-emulator.ps1 -Variant {{variant}}
+
+# ktlint + unit tests + debug APK in Docker; reports land in dist/reports
+docker-check:
+    pwsh -NoProfile -File docker/build-apk.ps1 -Variant check
