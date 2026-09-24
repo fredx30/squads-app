@@ -30,6 +30,20 @@ chmod +x /src/gradlew
 # Windows checkouts with core.autocrlf=true hand us CRLF scripts; /bin/sh needs LF.
 sed -i 's/\r$//' /src/gradlew /src/gradle/wrapper/gradle-wrapper.properties
 
+# gradle/gradle-daemon-jvm.properties (from `gradle updateDaemonJvm`, often IDE-generated) makes
+# Gradle provision its own daemon JDK from Foojay. That JDK would not carry the CAs baked into
+# this image and would not match CI's JDK 21, so unless HONOR_DAEMON_JVM=1 the container JDK wins.
+djvm=/src/gradle/gradle-daemon-jvm.properties
+if [ -f "$djvm" ] && [ "${HONOR_DAEMON_JVM:-0}" != 1 ]; then
+  want=$(sed -n 's/^toolchainVersion=//p' "$djvm" | tr -d '\r')
+  have=$(java -version 2>&1 | sed -n 's/^openjdk version "\([0-9]*\).*/\1/p')
+  if [ -n "$want" ] && [ "$want" != "$have" ]; then
+    echo "==> Ignoring gradle-daemon-jvm.properties (wants JDK $want); using container JDK $have like CI" >&2
+    echo "    (set HONOR_DAEMON_JVM=1 to let Gradle download that toolchain instead)" >&2
+    rm -f "$djvm"
+  fi
+fi
+
 if [ -n "${KEYSTORE_BASE64:-}" ]; then
   echo "==> Decoding release keystore from KEYSTORE_BASE64"
   echo "$KEYSTORE_BASE64" | base64 -d > /src/app/release.keystore
