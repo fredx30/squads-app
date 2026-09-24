@@ -54,6 +54,42 @@ class MailWebViewUrlPolicyTest {
     }
 
     @Test
+    fun `hasRemoteImages detects double quoted https src`() {
+        assertTrue(hasRemoteImages("""<p>Hi</p><img src="https://tracker.example/p.gif">"""))
+    }
+
+    @Test
+    fun `hasRemoteImages detects single quoted and unquoted http src`() {
+        assertTrue(hasRemoteImages("<img width=1 src='http://tracker.example/p.gif'>"))
+        assertTrue(hasRemoteImages("<IMG SRC=http://tracker.example/p.gif>"))
+    }
+
+    @Test
+    fun `hasRemoteImages ignores inline data and cid sources`() {
+        assertFalse(hasRemoteImages("""<img src="data:image/png;base64,AAAA">"""))
+        assertFalse(hasRemoteImages("""<img src="cid:image001.png@01D">"""))
+    }
+
+    @Test
+    fun `hasRemoteImages ignores graph urls`() {
+        val html = """<img src="https://graph.microsoft.com/v1.0/me/photo/${'$'}value">"""
+        assertFalse(hasRemoteImages(html))
+    }
+
+    @Test
+    fun `hasRemoteImages ignores links and plain text urls`() {
+        val html = """<a href="https://example.com">https://example.com/img.png</a>"""
+        assertFalse(hasRemoteImages(html))
+    }
+
+    @Test
+    fun `hasRemoteImages finds remote src after a graph src`() {
+        val html =
+            """<img src="https://graph.microsoft.com/x"><img src="https://tracker.example/p">"""
+        assertTrue(hasRemoteImages(html))
+    }
+
+    @Test
     fun `isAllowedExternalLinkScheme allows http https and mailto`() {
         assertTrue(isAllowedExternalLinkScheme("http"))
         assertTrue(isAllowedExternalLinkScheme("HTTPS"))
