@@ -12,7 +12,8 @@ variant="${1:-release}"
 case "$variant" in
   release) tasks=(assembleRelease); out=app/build/outputs/apk/release ;;
   debug)   tasks=(assembleDebug);   out=app/build/outputs/apk/debug ;;
-  check)   tasks=(ktlintCheck testDebugUnitTest assembleDebug); out=app/build/outputs/apk/debug ;;
+  # --continue so a ktlint failure still lets tests and the APK build run; one pass reports all.
+  check)   tasks=(--continue ktlintCheck testDebugUnitTest assembleDebug); out=app/build/outputs/apk/debug ;;
   *) echo "usage: build-apk [release|debug|check]" >&2; exit 2 ;;
 esac
 
