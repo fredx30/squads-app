@@ -43,13 +43,23 @@ fi
 
 echo "==> ./gradlew ${tasks[*]}"
 cd /src
-./gradlew --no-daemon --console=plain "${tasks[@]}"
+status=0
+./gradlew --no-daemon --console=plain "${tasks[@]}" || status=$?
 
 if [ "$variant" = check ]; then
-  echo "==> Copying test reports to /dist/reports"
+  # Copy reports even when the build failed; that is when they are most useful.
+  echo "==> Copying test/ktlint reports to /dist/reports"
   rm -rf /dist/reports && mkdir -p /dist/reports
   cp -r app/build/reports/tests /dist/reports/ 2>/dev/null || true
   cp -r app/build/reports/ktlint /dist/reports/ 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    echo "==> ktlint violations (if any):"
+    cat app/build/reports/ktlint/*/*.txt 2>/dev/null | head -50 || true
+  fi
+fi
+if [ "$status" -ne 0 ]; then
+  echo "==> Build failed with exit $status" >&2
+  exit "$status"
 fi
 
 echo "==> Collecting APK(s)"

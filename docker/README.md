@@ -12,7 +12,10 @@ Android SDK, `./gradlew assembleRelease`, with the same `KEYSTORE_*` variables.
 | Build + launch | `./docker/run-in-emulator.ps1 -Build` | **Emulator - Build and Launch Release** |
 
 Output: `dist/app-release.apk` (gitignored). Gradle's cache persists in the Docker volume
-`squads-gradle-cache`; `docker volume rm squads-gradle-cache` resets it. The same recipes
+`squads-gradle-cache`; `docker volume rm squads-gradle-cache` resets it. Run one build
+container at a time: Gradle's cache locking cannot see processes in other containers, so two
+builds sharing the volume fail with `Timeout waiting to lock journal cache`. The host script
+refuses to start while another build container is running. The same recipes
 exist in the `justfile` as `docker-release`, `docker-debug`, `docker-image`, `emulator-run`.
 
 ## Prerequisites

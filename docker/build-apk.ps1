@@ -29,6 +29,13 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Docker daemon is not reachable. Start Rancher Desktop (container engine: dockerd/moby) and retry.'
 }
 
+# Gradle's cross-process cache locking does not work across containers, so two builds sharing
+# the squads-gradle-cache volume deadlock on the journal lock. Refuse to start a second one.
+$running = docker ps -q --filter "ancestor=$image"
+if ($running) {
+    throw "Another $image container is already running (id $($running -join ', ')). Wait for it or 'docker stop' it; concurrent builds sharing the Gradle cache volume deadlock."
+}
+
 $certs = Get-ChildItem "$repo/docker/certs" -Filter *.crt -ErrorAction SilentlyContinue
 if (-not $certs) {
     Write-Warning 'No docker/certs/*.crt found. On a network with TLS inspection, dependency downloads will fail with "PKIX path building failed". Export the root CA to docker/certs/ and run with -Rebuild.'
