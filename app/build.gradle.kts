@@ -40,6 +40,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".dev"
+            buildConfigField("boolean", "SECURE_WINDOW", "false")
             if (file("release.keystore").exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -47,6 +48,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            buildConfigField("boolean", "SECURE_WINDOW", "true")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -67,6 +69,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     @Suppress("UnstableApiUsage")
