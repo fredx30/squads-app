@@ -4,7 +4,8 @@
 .DESCRIPTION
   First run bootstraps what is missing: Android command-line tools, the API 36 x86_64
   system image (~1.5 GB download), and an AVD named squads_api36. Then it boots the
-  emulator if no device is online, installs the APK and starts MainActivity.
+  emulator if no device is online, installs the APK and starts MainActivity. An already
+  online device (emulator or USB) is used as is; nothing is downloaded in that case.
 .PARAMETER Variant
   release (default) installs dist/app-release.apk as com.squads.app;
   debug installs dist/app-debug.apk as com.squads.app.dev.
@@ -52,36 +53,39 @@ if (-not $env:JAVA_HOME) {
     if (Test-Path "$jbr\bin\java.exe") { $env:JAVA_HOME = $jbr }
 }
 
-# --- 1. command-line tools -----------------------------------------------------------
-if (-not (Test-Path $sdkmanager)) {
-    Write-Host '==> Installing Android command-line tools' -ForegroundColor Cyan
-    $zip = Join-Path $env:TEMP 'commandlinetools-win.zip'
-    $tmp = Join-Path $env:TEMP 'commandlinetools-win'
-    Invoke-WebRequest -Uri 'https://dl.google.com/android/repository/commandlinetools-win-13114758_latest.zip' `
-        -OutFile $zip -UseBasicParsing
-    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-    Expand-Archive -Path $zip -DestinationPath $tmp
-    New-Item -ItemType Directory -Force "$sdk\cmdline-tools" | Out-Null
-    Move-Item "$tmp\cmdline-tools" "$sdk\cmdline-tools\latest"
-    Remove-Item -Recurse -Force $tmp, $zip
-}
-
-# --- 2. system image + AVD -----------------------------------------------------------
-$avds = @(& $emulator -list-avds 2>$null)
-if ($avds -notcontains $AvdName) {
-    Write-Host "==> Installing $SystemImage (large download, once)" -ForegroundColor Cyan
-    ('y' * 20).ToCharArray() | ForEach-Object { "$_" } | & $sdkmanager --licenses | Out-Null
-    & $sdkmanager --install $SystemImage 'platform-tools' 'emulator'
-    if ($LASTEXITCODE -ne 0) { throw 'sdkmanager failed.' }
-    Write-Host "==> Creating AVD $AvdName ($Device)" -ForegroundColor Cyan
-    'no' | & $avdmanager create avd --force --name $AvdName --package $SystemImage --device $Device
-    if ($LASTEXITCODE -ne 0) { throw 'avdmanager failed.' }
-}
-
-# --- 3. boot emulator if nothing is online -------------------------------------------
+# --- 1. use whatever is already online; otherwise bootstrap tools + image + AVD and boot it ---
 & $adb start-server | Out-Null
 $online = @(& $adb devices | Select-String '\tdevice$')
-if (-not $online) {
+if ($online) {
+    Write-Host "==> Using online device $(($online[0].Line -split '\t')[0])" -ForegroundColor Cyan
+} else {
+    # --- 1a. command-line tools ----------------------------------------------------------
+    if (-not (Test-Path $sdkmanager)) {
+        Write-Host '==> Installing Android command-line tools' -ForegroundColor Cyan
+        $zip = Join-Path $env:TEMP 'commandlinetools-win.zip'
+        $tmp = Join-Path $env:TEMP 'commandlinetools-win'
+        Invoke-WebRequest -Uri 'https://dl.google.com/android/repository/commandlinetools-win-13114758_latest.zip' `
+            -OutFile $zip -UseBasicParsing
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        Expand-Archive -Path $zip -DestinationPath $tmp
+        New-Item -ItemType Directory -Force "$sdk\cmdline-tools" | Out-Null
+        Move-Item "$tmp\cmdline-tools" "$sdk\cmdline-tools\latest"
+        Remove-Item -Recurse -Force $tmp, $zip
+    }
+
+    # --- 1b. system image + AVD ----------------------------------------------------------
+    $avds = @(& $emulator -list-avds 2>$null)
+    if ($avds -notcontains $AvdName) {
+        Write-Host "==> Installing $SystemImage (large download, once)" -ForegroundColor Cyan
+        ('y' * 20).ToCharArray() | ForEach-Object { "$_" } | & $sdkmanager --licenses | Out-Null
+        & $sdkmanager --install $SystemImage 'platform-tools' 'emulator'
+        if ($LASTEXITCODE -ne 0) { throw 'sdkmanager failed.' }
+        Write-Host "==> Creating AVD $AvdName ($Device)" -ForegroundColor Cyan
+        'no' | & $avdmanager create avd --force --name $AvdName --package $SystemImage --device $Device
+        if ($LASTEXITCODE -ne 0) { throw 'avdmanager failed.' }
+    }
+
+    # --- 1c. boot emulator ---------------------------------------------------------------
     Write-Host "==> Starting emulator $AvdName" -ForegroundColor Cyan
     Start-Process -FilePath $emulator -WindowStyle Minimized `
         -ArgumentList @('-avd', $AvdName, '-netdelay', 'none', '-netspeed', 'full')
@@ -94,7 +98,7 @@ if (-not $online) {
     if ($booted -ne '1') { throw 'Emulator did not finish booting within 4 minutes.' }
 }
 
-# --- 4. install + launch -------------------------------------------------------------
+# --- 2. install + launch -------------------------------------------------------------
 Write-Host "==> Installing $apk" -ForegroundColor Cyan
 & $adb install -r -d $apk
 if ($LASTEXITCODE -ne 0) {

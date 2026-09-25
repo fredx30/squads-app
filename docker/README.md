@@ -56,3 +56,12 @@ signer certificate of every APK it produces so you can compare with a GitHub rel
 - CI uses the GitHub runner's preinstalled SDK; the image installs
   `platforms;android-36` and `build-tools;36.0.0`. AGP downloads anything else it needs
   (`android.builder.sdkDownload=true`).
+
+## IDE run configurations
+
+The `.run/*.run.xml` files are IntelliJ *Shell Script* configurations in script-text mode:
+each one runs `pwsh -NoProfile -File docker/<script>.ps1 ...` in the IDE terminal with the
+project root as working directory, and `pwsh` resolves through `PATH`. They deliberately
+leave the interpreter field empty. A filled-in interpreter must be an absolute path to an
+existing executable, or the IDE marks the configuration invalid, and an absolute path would
+tie the checked-in file to one machine's PowerShell install.
