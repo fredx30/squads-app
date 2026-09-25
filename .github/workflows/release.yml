@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Build a debug APK (com.squads.app.dev, signed with the repository debug key from DEBUG_KEYSTORE_BASE64) instead of a release'
+        type: boolean
+        default: false
 
 # Deny-by-default at workflow level; permissions are granted per job below.
 permissions: {}
@@ -38,26 +43,114 @@ jobs:
           build-scan-terms-of-use-agree: 'yes'
 
       - name: Decode keystore
-        if: env.KEYSTORE_BASE64 != ''
+        if: inputs.debug != true && env.KEYSTORE_BASE64 != ''
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: echo "$KEYSTORE_BASE64" | base64 -d > app/release.keystore
 
       - name: Build release APK
+        if: inputs.debug != true
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
+      - name: Record release APK signer
+        if: inputs.debug != true
+        run: |
+          set -euo pipefail
+          apk=$(ls app/build/outputs/apk/release/*.apk)
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
+          subject=$(sed -n 's/^.*Signer: certificate DN: //p' apksigner.txt | sort -u | head -1)
+          digest=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')
+          # Setup signing keys puts PLACEHOLDER in the CN; a hand-inserted Play key has no marker.
+          if grep -q PLACEHOLDER <<<"$subject"; then
+            echo "::warning::Release APK is signed with the PLACEHOLDER self-signed key from the Setup signing keys workflow, not a Google Play key ($subject)"
+            heading="### Release APK signer: PLACEHOLDER self-signed (not Google Play)"
+          else
+            heading="### Release APK signer"
+          fi
+          {
+            echo "$heading"
+            echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
+            echo "- Certificate subject: \`$subject\`"
+            echo "- Signer certificate SHA-256: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Debug path (manual run with the "debug" box ticked) ----
+      # Signs with DEBUG_KEYSTORE_BASE64 from the "Setup signing keys" workflow:
+      # decode, build, prove the APK carries exactly that signer.
+      - name: Install debug signing key
+        if: inputs.debug == true
+        id: debugkey
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::error::Secret DEBUG_KEYSTORE_BASE64 is not set. Run the 'Setup signing keys' workflow once (Actions tab) to create this repository's debug signer."
+            exit 1
+          fi
+          ks="$HOME/.android/debug.keystore"
+          # AGP silently generates a debug keystore if none is where it looks; make sure ours is the one used.
+          for v in ANDROID_USER_HOME ANDROID_SDK_HOME ANDROID_PREFS_ROOT; do
+            if [ -n "${!v:-}" ]; then echo "::error::$v is set, so the debug keystore would not resolve to $ks"; exit 1; fi
+          done
+          if [ -e "$ks" ]; then echo "::error::$ks already exists on the runner"; exit 1; fi
+          found=$(find . -path ./.git -prune -o \( -name '*.keystore' -o -name '*.jks' -o -name '*.p12' -o -name '*.pfx' \) -print)
+          if [ -n "$found" ]; then echo "::error::key material committed in the checkout:"; echo "$found"; exit 1; fi
+          mkdir -p "$(dirname "$ks")"
+          echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$ks"
+          keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey | tee keytool.txt
+          fp=$(sed -n 's/^[[:space:]]*SHA256: //p' keytool.txt | tr -d ':' | tr 'A-F' 'a-f')
+          test -n "$fp"
+          echo "sha256=$fp" >> "$GITHUB_OUTPUT"
+          echo "Repository debug signer certificate SHA-256: $fp"
+
+      - name: Build debug APK
+        if: inputs.debug == true
+        run: ./gradlew assembleDebug
+
+      - name: Assert APK is signed by the repository debug key
+        if: inputs.debug == true
+        env:
+          EXPECTED: ${{ steps.debugkey.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          apk=$(ls app/build/outputs/apk/debug/*.apk)
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
+          # --verbose prints one "<scheme> Signer: certificate SHA-256 digest:" line per
+          # scheme; dedupe so a key used for v2 and v3 counts once.
+          signers=$(sed -n 's/^Number of signers: //p' apksigner.txt)
+          digests=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u)
+          ndigests=$(echo "$digests" | grep -c .)
+          actual=$(echo "$digests" | head -1)
+          echo "expected signer: $EXPECTED"
+          echo "actual signer:   $actual (signers: $signers, distinct certs: $ndigests)"
+          if [ "$signers" != "1" ] || [ "$ndigests" != "1" ]; then
+            echo "::error::expected exactly one signer certificate, found signers=$signers distinct certs=$ndigests"
+            exit 1
+          fi
+          if [ "$actual" != "$EXPECTED" ]; then echo "::error::APK signer does not match DEBUG_KEYSTORE_BASE64"; exit 1; fi
+          {
+            echo "### Debug APK signer"
+            echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
+            echo "- Signer certificate SHA-256: \`$actual\` (repository debug key, secret DEBUG_KEYSTORE_BASE64)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: squads-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: ${{ inputs.debug == true && 'squads-debug-apk' || 'squads-release-apk' }}
+          path: app/build/outputs/apk/${{ inputs.debug == true && 'debug' || 'release' }}/*.apk
 
+      # Only tag pushes publish. A manual dispatch run on a tag ref (debug or not)
+      # must never create or overwrite a GitHub Release.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: app/build/outputs/apk/release/*.apk
