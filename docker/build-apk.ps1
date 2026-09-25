@@ -56,6 +56,14 @@ $runArgs = @(
     '-v', "${repo}/dist:/dist",
     '-v', 'squads-gradle-cache:/gradle-cache'
 )
+# Sign debug builds with the host's debug key so Docker, IDE and CI debug APKs install over
+# each other (docker/share-debug-key.ps1 pushes the same file to GitHub).
+$debugKeystore = Join-Path $HOME '.android/debug.keystore'
+if (Test-Path $debugKeystore) {
+    $runArgs += @('-v', "${debugKeystore}:/root/.android/debug.keystore:ro")
+} elseif ($Variant -ne 'release') {
+    Write-Warning "$debugKeystore not found: the container will sign with a throwaway debug key. Run docker/share-debug-key.ps1 once."
+}
 $envFile = Join-Path $repo 'docker/release.env'
 if (Test-Path $envFile) {
     $runArgs += @('--env-file', $envFile)

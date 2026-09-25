@@ -113,8 +113,7 @@ val verifyReleaseSigning =
                 "Release signing is not configured:\n" +
                     releaseSigningProblems.joinToString("\n") { "  - $it" } +
                     "\nProvide app/release.keystore and set KEYSTORE_PASSWORD, KEY_ALIAS and " +
-                    "KEY_PASSWORD as environment variables or in local.properties, or run the " +
-                    "'Setup signing keys' GitHub workflow to create placeholder secrets for CI."
+                    "KEY_PASSWORD as environment variables or in local.properties."
             }
         doFirst {
             if (failureMessage != null) throw GradleException(failureMessage)
