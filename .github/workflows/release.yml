@@ -66,7 +66,7 @@ jobs:
           {
             echo "### Release APK signer"
             echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
-            echo "- Signer certificate SHA-256: \`$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.txt)\`"
+            echo "- Signer certificate SHA-256: \`$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Debug path (manual run with the "debug" box ticked) ----
@@ -115,9 +115,13 @@ jobs:
           mkdir -p "$(dirname "$ks")"
           # Standard Android debug credentials. The key is random, the passwords are
           # public by design, and the file is discarded with the runner.
-          keytool -genkeypair -v             -keystore "$ks" -storepass android -keypass android             -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 30             -dname "CN=Android Debug, O=Android, C=US"
+          keytool -genkeypair -v \
+            -keystore "$ks" -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 30 \
+            -dname "CN=Android Debug, O=Android, C=US"
           keytool -list -v -keystore "$ks" -storepass android
-          fp=$(keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey                | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          fp=$(keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey \
+               | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
           test -n "$fp"
           echo "sha256=$fp" >> "$GITHUB_OUTPUT"
           echo "Generated debug signer certificate SHA-256: $fp"
@@ -135,11 +139,18 @@ jobs:
           apk=$(ls app/build/outputs/apk/debug/*.apk)
           apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
-          signers=$(grep -c '^Signer #[0-9]* certificate SHA-256 digest: ' apksigner.txt)
-          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.txt)
+          # --verbose prints one "<scheme> Signer: certificate SHA-256 digest:" line per
+          # scheme; dedupe so a key used for v2 and v3 counts once.
+          signers=$(sed -n 's/^Number of signers: //p' apksigner.txt)
+          digests=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u)
+          ndigests=$(echo "$digests" | grep -c .)
+          actual=$(echo "$digests" | head -1)
           echo "expected signer: $EXPECTED"
-          echo "actual signer:   $actual (signers: $signers)"
-          if [ "$signers" != "1" ]; then echo "::error::expected exactly one signer, found $signers"; exit 1; fi
+          echo "actual signer:   $actual (signers: $signers, distinct certs: $ndigests)"
+          if [ "$signers" != "1" ] || [ "$ndigests" != "1" ]; then
+            echo "::error::expected exactly one signer certificate, found signers=$signers distinct certs=$ndigests"
+            exit 1
+          fi
           if [ "$actual" != "$EXPECTED" ]; then echo "::error::APK signer does not match the key generated in this run"; exit 1; fi
           {
             echo "### Debug APK signer"
