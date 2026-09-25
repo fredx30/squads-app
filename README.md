@@ -68,12 +68,11 @@ just ship 0.3.0   # bump version, tag, and push
 
 ### Signing
 
-CI signs with keys in GitHub Actions secrets; forks inherit none. To bootstrap a repo or fork:
-store a fine-grained PAT with **Secrets: read and write** as `SIGNING_SETUP_TOKEN`, then run the
-**Setup signing keys** workflow. It creates self-signed placeholder debug and release keys
-(release CN contains `PLACEHOLDER`; release runs warn about it) and overwrites them on re-run.
-For Google Play, set `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` by hand;
-setup then refuses to overwrite that key unless told to.
+Debug builds everywhere sign with your machine's `~/.android/debug.keystore`: the IDE uses it
+directly, Docker mounts it, and the run config **Signing - Share debug key with Docker and
+GitHub** (`docker/share-debug-key.ps1`) stores it as the `DEBUG_KEYSTORE_BASE64` secret so CI
+debug builds match. Run it once per machine and once per fork. Release builds need
+`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` as secrets, set by hand.
 
 ## Tech stack
 

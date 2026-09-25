@@ -65,23 +65,16 @@ jobs:
           "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
           subject=$(sed -n 's/^.*Signer: certificate DN: //p' apksigner.txt | sort -u | head -1)
           digest=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')
-          # Setup signing keys puts PLACEHOLDER in the CN; a hand-inserted Play key has no marker.
-          if grep -q PLACEHOLDER <<<"$subject"; then
-            echo "::warning::Release APK is signed with the PLACEHOLDER self-signed key from the Setup signing keys workflow, not a Google Play key ($subject)"
-            heading="### Release APK signer: PLACEHOLDER self-signed (not Google Play)"
-          else
-            heading="### Release APK signer"
-          fi
           {
-            echo "$heading"
+            echo "### Release APK signer"
             echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
             echo "- Certificate subject: \`$subject\`"
             echo "- Signer certificate SHA-256: \`$digest\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Debug path (manual run with the "debug" box ticked) ----
-      # Signs with DEBUG_KEYSTORE_BASE64 from the "Setup signing keys" workflow:
-      # decode, build, prove the APK carries exactly that signer.
+      # Signs with DEBUG_KEYSTORE_BASE64, a developer's ~/.android/debug.keystore pushed by
+      # docker/share-debug-key.ps1: decode, build, prove the APK carries exactly that signer.
       - name: Install debug signing key
         if: inputs.debug == true
         id: debugkey
@@ -90,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "::error::Secret DEBUG_KEYSTORE_BASE64 is not set. Run the 'Setup signing keys' workflow once (Actions tab) to create this repository's debug signer."
+            echo "::error::Secret DEBUG_KEYSTORE_BASE64 is not set. Run docker/share-debug-key.ps1 (IDE: 'Signing - Share debug key with Docker and GitHub') once from a developer machine."
             exit 1
           fi
           ks="$HOME/.android/debug.keystore"
