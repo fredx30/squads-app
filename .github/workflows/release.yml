@@ -65,8 +65,7 @@ jobs:
           "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
           subject=$(sed -n 's/^.*Signer: certificate DN: //p' apksigner.txt | sort -u | head -1)
           digest=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')
-          # The "Setup signing keys" workflow puts PLACEHOLDER in the CN of the self-signed
-          # stand-in key it creates. A key inserted by hand (the real Play key) has no marker.
+          # Setup signing keys puts PLACEHOLDER in the CN; a hand-inserted Play key has no marker.
           if grep -q PLACEHOLDER <<<"$subject"; then
             echo "::warning::Release APK is signed with the PLACEHOLDER self-signed key from the Setup signing keys workflow, not a Google Play key ($subject)"
             heading="### Release APK signer: PLACEHOLDER self-signed (not Google Play)"
@@ -81,11 +80,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Debug path (manual run with the "debug" box ticked) ----
-      # Signs with the repository's own debug key, DEBUG_KEYSTORE_BASE64, created once by
-      # the "Setup signing keys" workflow. Successive debug builds therefore update in place
-      # on a device. GitHub never copies secrets into a fork, so a fork gets its own signer
-      # by running that workflow itself. Same shape as the release path: decode the secret,
-      # build, prove the APK carries exactly that signer.
+      # Signs with DEBUG_KEYSTORE_BASE64 from the "Setup signing keys" workflow:
+      # decode, build, prove the APK carries exactly that signer.
       - name: Install debug signing key
         if: inputs.debug == true
         id: debugkey
@@ -98,8 +94,7 @@ jobs:
             exit 1
           fi
           ks="$HOME/.android/debug.keystore"
-          # AGP reads the debug keystore from ~/.android unless one of these redirects it,
-          # and would silently generate one there if missing. Make sure ours is the one used.
+          # AGP silently generates a debug keystore if none is where it looks; make sure ours is the one used.
           for v in ANDROID_USER_HOME ANDROID_SDK_HOME ANDROID_PREFS_ROOT; do
             if [ -n "${!v:-}" ]; then echo "::error::$v is set, so the debug keystore would not resolve to $ks"; exit 1; fi
           done
@@ -108,7 +103,6 @@ jobs:
           if [ -n "$found" ]; then echo "::error::key material committed in the checkout:"; echo "$found"; exit 1; fi
           mkdir -p "$(dirname "$ks")"
           echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$ks"
-          # Standard Android debug credentials: alias androiddebugkey, passwords "android".
           keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey | tee keytool.txt
           fp=$(sed -n 's/^[[:space:]]*SHA256: //p' keytool.txt | tr -d ':' | tr 'A-F' 'a-f')
           test -n "$fp"

@@ -68,22 +68,12 @@ just ship 0.3.0   # bump version, tag, and push
 
 ### Signing
 
-CI signs with keys held in GitHub Actions secrets; nothing is committed and forks inherit none
-of them. To get a fresh repository or fork building:
-
-1. Create a fine-grained personal access token for the repo with **Secrets: read and write** and
-   store it as the `SIGNING_SETUP_TOKEN` secret.
-2. Run the **Setup signing keys** workflow from the Actions tab. It creates a debug key
-   (`DEBUG_KEYSTORE_BASE64`, standard debug credentials) and a release key (`KEYSTORE_BASE64`,
-   `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`) and prints their fingerprints.
-
-Both keys are self-signed placeholders: they give successive builds a consistent signer so
-they install over each other, but establish no external trust. The release certificate says
-so in its subject (`CN=PLACEHOLDER ...`) and every release run warns about it. Re-running the
-workflow replaces the keys, after which existing installs need an uninstall.
-
-For Google Play, obtain the upload key and set the four release secrets by hand. Setup then
-refuses to overwrite it unless explicitly told to, since that would be the real app identity.
+CI signs with keys in GitHub Actions secrets; forks inherit none. To bootstrap a repo or fork:
+store a fine-grained PAT with **Secrets: read and write** as `SIGNING_SETUP_TOKEN`, then run the
+**Setup signing keys** workflow. It creates self-signed placeholder debug and release keys
+(release CN contains `PLACEHOLDER`; release runs warn about it) and overwrites them on re-run.
+For Google Play, set `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` by hand;
+setup then refuses to overwrite that key unless told to.
 
 ## Tech stack
 
