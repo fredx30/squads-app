@@ -1,0 +1,204 @@
+name: Setup signing keys
+
+# Creates this repository's signing keys as GitHub Actions secrets. Run by hand from the
+# Actions tab, once per repository (and once per fork: GitHub copies no secrets into a fork,
+# and the release workflow fails if a keystore is ever committed, so a fork starts with no
+# signer of its own until it runs this).
+#
+# PLACEHOLDER, SELF-SIGNED. Every Android signing certificate is self-signed; the only
+# external trust an app can have comes from Google Play App Signing, where Google holds
+# the app signing key and the developer holds an upload key registered with Play. Nothing
+# here talks to Play. The release key this workflow makes is a stand-in so that CI can
+# produce installable, consistently signed builds until the real Play key is inserted by
+# hand. It is labelled as such in its certificate subject (CN contains PLACEHOLDER), which
+# every release run prints and warns about.
+#
+# Setup overwrites. Re-running replaces the selected keys:
+#   debug   -> devices holding an earlier debug build need an uninstall before the next
+#              one installs (signer changed)
+#   release -> the app identity changes; every existing install must be removed and
+#              reinstalled, and any Play listing would need a key reset
+# The one guarded case: a release key whose certificate does NOT carry the PLACEHOLDER
+# marker was inserted by hand, i.e. it is the real key. Overwriting that is refused unless
+# the "replace_real_release_key" box is ticked.
+#
+# Inserting the real Play key by hand (replaces the placeholder; later setup runs refuse
+# to touch it):
+#   gh secret set KEYSTORE_BASE64   --repo <owner/repo> < <(base64 -w0 upload.keystore)
+#   gh secret set KEYSTORE_PASSWORD --repo <owner/repo>
+#   gh secret set KEY_ALIAS         --repo <owner/repo>
+#   gh secret set KEY_PASSWORD      --repo <owner/repo>
+#
+# Secrets written:
+#   debug   -> DEBUG_KEYSTORE_BASE64 (alias androiddebugkey, passwords "android": the
+#              standard debug credentials AGP and the IDE expect)
+#   release -> KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+#              (random passwords; what app/build.gradle.kts and release.yml consume)
+#
+# Prerequisite: GITHUB_TOKEN cannot write secrets, so a repo admin stores a fine-grained
+# personal access token as SIGNING_SETUP_TOKEN, scoped to this single repository with
+# repository permission "Secrets: read and write" (plus the implied Metadata: read) and
+# nothing else. Creating that token is the only manual step.
+#
+# There is no backup of any key: secret values cannot be read back. Nothing is checked
+# out and no key leaves the runner: generated in a temp dir, stored as a secret,
+# fingerprinted into the run summary, shredded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keys:
+        description: 'Which keystores to (re)create'
+        type: choice
+        options: [both, debug, release]
+        default: both
+      replace_real_release_key:
+        description: 'Also overwrite a release key that was inserted by hand (certificate without the PLACEHOLDER marker). This destroys the real signing identity.'
+        type: boolean
+        default: false
+
+# Deny-by-default; the job needs nothing from GITHUB_TOKEN at all.
+permissions: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SIGNING_SETUP_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PLACEHOLDER_MARK: PLACEHOLDER
+    steps:
+      - name: Check the setup token
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Secret SIGNING_SETUP_TOKEN is not set. Store a fine-grained PAT for $GH_REPO with 'Secrets: read and write' under that name, then re-run."
+            exit 1
+          fi
+          # Listing proves read access; write access is proven when the first secret is set.
+          n=$(gh api "repos/$GH_REPO/actions/secrets" --jq '.total_count')
+          echo "OK: token can read secrets on $GH_REPO ($n existing)"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Assert no key material present
+        run: |
+          set -euo pipefail
+          for v in ANDROID_USER_HOME ANDROID_SDK_HOME ANDROID_PREFS_ROOT; do
+            if [ -n "${!v:-}" ]; then echo "::error::$v is set on the runner"; exit 1; fi
+          done
+          if [ -e "$HOME/.android/debug.keystore" ]; then echo "::error::$HOME/.android/debug.keystore exists before generation"; exit 1; fi
+          if ls ./*.keystore ./*.jks > /dev/null 2>&1; then echo "::error::keystore files in the working directory"; exit 1; fi
+          echo "OK: HOME=$HOME, no keystores, no keystore-location overrides"
+          {
+            echo "## Placeholder self-signed keys"
+            echo "Keys created here are self-signed placeholders. They establish no external trust and"
+            echo "are meant to be replaced by the real Google Play upload key, inserted by hand into"
+            echo "the same secrets (see the comment block in \`.github/workflows/setup-signing.yml\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Debug keystore
+        if: inputs.keys != 'release'
+        run: |
+          set -euo pipefail
+          ks=$(mktemp -d)/debug.keystore
+          keytool -genkeypair -v \
+            -keystore "$ks" -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug, O=Android, C=US"
+          keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey | tee keytool.txt
+          fp=$(sed -n 's/^[[:space:]]*SHA256: //p' keytool.txt | tr -d ':' | tr 'A-F' 'a-f')
+          test -n "$fp"
+          base64 -w0 "$ks" | gh secret set DEBUG_KEYSTORE_BASE64 --repo "$GH_REPO"
+          shred -u "$ks" keytool.txt
+          echo "Stored DEBUG_KEYSTORE_BASE64; signer certificate SHA-256: $fp"
+          {
+            echo "### Debug key (replaced)"
+            echo "- Secret: \`DEBUG_KEYSTORE_BASE64\` (alias androiddebugkey, passwords \`android\`)"
+            echo "- Signer certificate SHA-256: \`$fp\`"
+            echo "- Debug builds from the release workflow now sign with this key. Devices holding a debug build signed by the previous key need an uninstall before the next one installs."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guard the real release key
+        if: inputs.keys != 'debug'
+        env:
+          CURRENT_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          CURRENT_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          CURRENT_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          REPLACE_REAL: ${{ inputs.replace_real_release_key }}
+        run: |
+          set -euo pipefail
+          # A workflow can read its own secrets even though the API cannot. Decode the
+          # current release keystore and look at its certificate subject: the placeholder
+          # this workflow makes carries the marker in CN; a key inserted by hand does not.
+          if [ -z "$CURRENT_KEYSTORE_BASE64" ]; then
+            echo "No KEYSTORE_BASE64 secret yet; nothing to guard."
+            exit 0
+          fi
+          cur=$(mktemp -d)/current.keystore
+          echo "$CURRENT_KEYSTORE_BASE64" | base64 -d > "$cur"
+          # A keystore that does not open with the stored password/alias is broken
+          # anyway; treat it as replaceable but say so.
+          if ! keytool -list -v -keystore "$cur" -storepass "$CURRENT_KEYSTORE_PASSWORD" \
+               -alias "$CURRENT_KEY_ALIAS" > current.txt 2>&1; then
+            echo "::warning::existing KEYSTORE_BASE64 does not open with KEYSTORE_PASSWORD/KEY_ALIAS; treating it as replaceable"
+            shred -u "$cur"; rm -f current.txt
+            exit 0
+          fi
+          subject=$(sed -n 's/^Owner: //p' current.txt | head -1)
+          fp=$(sed -n 's/^[[:space:]]*SHA256: //p' current.txt | tr -d ':' | tr 'A-F' 'a-f')
+          shred -u "$cur"; rm -f current.txt
+          echo "current release signer: $subject (SHA-256 $fp)"
+          if grep -q "$PLACEHOLDER_MARK" <<<"$subject"; then
+            echo "Current release key is a placeholder from this workflow; replacing it."
+            exit 0
+          fi
+          if [ "$REPLACE_REAL" = true ]; then
+            echo "::warning::Replacing a release key that was inserted by hand (subject: $subject). The app's signing identity changes."
+            exit 0
+          fi
+          echo "::error::The current release key was inserted by hand (subject: $subject), so it is the real signing identity, not a placeholder. Refusing to overwrite it. Tick 'replace_real_release_key' if that is really intended, or run with keys=debug."
+          exit 1
+
+      - name: Release keystore
+        if: inputs.keys != 'debug'
+        run: |
+          set -euo pipefail
+          store_pw=$(openssl rand -hex 32); key_pw=$(openssl rand -hex 32)
+          echo "::add-mask::$store_pw"; echo "::add-mask::$key_pw"
+          alias=release
+          owner=${GH_REPO%%/*}
+          ks=$(mktemp -d)/release.keystore
+          # RSA 2048 and ~27 years validity match the Android Studio defaults and Play's
+          # rule that the certificate must be valid past 2033. The CN carries the marker
+          # that release.yml and the guard step above key on.
+          keytool -genkeypair -v \
+            -keystore "$ks" -storepass "$store_pw" -keypass "$key_pw" \
+            -alias "$alias" -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=$PLACEHOLDER_MARK self-signed release key (not Google Play), OU=setup-signing workflow, O=$owner"
+          keytool -list -v -keystore "$ks" -storepass "$store_pw" -alias "$alias" | tee keytool.txt
+          fp=$(sed -n 's/^[[:space:]]*SHA256: //p' keytool.txt | tr -d ':' | tr 'A-F' 'a-f')
+          test -n "$fp"
+          # All four or nothing: write the keystore last so a failure part-way leaves the
+          # release path unconfigured rather than pointing at a keystore with wrong passwords.
+          gh secret set KEYSTORE_PASSWORD --repo "$GH_REPO" --body "$store_pw"
+          gh secret set KEY_ALIAS        --repo "$GH_REPO" --body "$alias"
+          gh secret set KEY_PASSWORD     --repo "$GH_REPO" --body "$key_pw"
+          base64 -w0 "$ks" | gh secret set KEYSTORE_BASE64 --repo "$GH_REPO"
+          shred -u "$ks" keytool.txt
+          echo "Stored release signing secrets; signer certificate SHA-256: $fp"
+          {
+            echo "### Release key (replaced): PLACEHOLDER, self-signed"
+            echo "- Secrets: \`KEYSTORE_BASE64\`, \`KEYSTORE_PASSWORD\`, \`KEY_ALIAS\` (\`$alias\`), \`KEY_PASSWORD\`"
+            echo "- Certificate subject: \`CN=$PLACEHOLDER_MARK self-signed release key (not Google Play), OU=setup-signing workflow, O=$owner\`"
+            echo "- Signer certificate SHA-256: \`$fp\`"
+            echo "- Not registered with Google Play. Insert the real upload key by hand to replace it; this workflow will then refuse to overwrite it."
+            echo "- The app identity changed: installs signed by the previous release key must be removed before this one installs. No copy of this key exists outside GitHub secrets."
+          } >> "$GITHUB_STEP_SUMMARY"

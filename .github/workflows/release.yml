@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       debug:
-        description: 'Build a debug APK (com.squads.app.dev, signed with the runner debug key) instead of a release'
+        description: 'Build a debug APK (com.squads.app.dev, signed with the repository debug key from DEBUG_KEYSTORE_BASE64) instead of a release'
         type: boolean
         default: false
 
@@ -63,74 +63,63 @@ jobs:
           apk=$(ls app/build/outputs/apk/release/*.apk)
           apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
+          subject=$(sed -n 's/^.*Signer: certificate DN: //p' apksigner.txt | sort -u | head -1)
+          digest=$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')
+          # The "Setup signing keys" workflow puts PLACEHOLDER in the CN of the self-signed
+          # stand-in key it creates. A key inserted by hand (the real Play key) has no marker.
+          if grep -q PLACEHOLDER <<<"$subject"; then
+            echo "::warning::Release APK is signed with the PLACEHOLDER self-signed key from the Setup signing keys workflow, not a Google Play key ($subject)"
+            heading="### Release APK signer: PLACEHOLDER self-signed (not Google Play)"
+          else
+            heading="### Release APK signer"
+          fi
           {
-            echo "### Release APK signer"
+            echo "$heading"
             echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
-            echo "- Signer certificate SHA-256: \`$(sed -n 's/^.*Signer: certificate SHA-256 digest: //p' apksigner.txt | sort -u | paste -sd' ')\`"
+            echo "- Certificate subject: \`$subject\`"
+            echo "- Signer certificate SHA-256: \`$digest\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Debug path (manual run with the "debug" box ticked) ----
-      # Manual escape hatch while release signing is unconfigured, or for sharing a
-      # test build. The signer is a throwaway key that exists only for this run, so
-      # every step is explicit and the run log is the complete record of it:
-      #   1. assert the runner holds no key material and nothing redirects the
-      #      debug keystore location away from ~/.android
-      #   2. generate the key with keytool, parameters and fingerprint logged
-      #   3. build
-      #   4. assert the APK carries exactly one signer and it is that key
-      # AGP would otherwise generate ~/.android/debug.keystore silently inside
-      # validateSigningDebug; step 2 pre-empts that so nothing is created unlogged.
-      - name: Assert no key material present
-        if: inputs.debug == true
-        run: |
-          set -euo pipefail
-          fail=0
-          for v in ANDROID_USER_HOME ANDROID_SDK_HOME ANDROID_PREFS_ROOT; do
-            if [ -n "${!v:-}" ]; then
-              echo "::error::$v is set to '${!v}', so the debug keystore would not resolve to ~/.android"
-              fail=1
-            fi
-          done
-          for f in "$HOME/.android/debug.keystore" app/release.keystore; do
-            if [ -e "$f" ]; then
-              echo "::error::$f exists before the build"
-              fail=1
-            fi
-          done
-          found=$(find . -path ./.git -prune -o \( -name '*.keystore' -o -name '*.jks' -o -name '*.p12' -o -name '*.pfx' -o -name '*.pem' \) -print)
-          if [ -n "$found" ]; then
-            echo "::error::key material found in the checkout:"
-            echo "$found"
-            fail=1
-          fi
-          if [ "$fail" -ne 0 ]; then exit 1; fi
-          echo "OK: HOME=$HOME, no keystore files, no key files in checkout, no keystore-location overrides"
-
-      - name: Generate throwaway debug key
+      # Signs with the repository's own debug key, DEBUG_KEYSTORE_BASE64, created once by
+      # the "Setup signing keys" workflow. Successive debug builds therefore update in place
+      # on a device. GitHub never copies secrets into a fork, so a fork gets its own signer
+      # by running that workflow itself. Same shape as the release path: decode the secret,
+      # build, prove the APK carries exactly that signer.
+      - name: Install debug signing key
         if: inputs.debug == true
         id: debugkey
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::error::Secret DEBUG_KEYSTORE_BASE64 is not set. Run the 'Setup signing keys' workflow once (Actions tab) to create this repository's debug signer."
+            exit 1
+          fi
           ks="$HOME/.android/debug.keystore"
+          # AGP reads the debug keystore from ~/.android unless one of these redirects it,
+          # and would silently generate one there if missing. Make sure ours is the one used.
+          for v in ANDROID_USER_HOME ANDROID_SDK_HOME ANDROID_PREFS_ROOT; do
+            if [ -n "${!v:-}" ]; then echo "::error::$v is set, so the debug keystore would not resolve to $ks"; exit 1; fi
+          done
+          if [ -e "$ks" ]; then echo "::error::$ks already exists on the runner"; exit 1; fi
+          found=$(find . -path ./.git -prune -o \( -name '*.keystore' -o -name '*.jks' -o -name '*.p12' -o -name '*.pfx' \) -print)
+          if [ -n "$found" ]; then echo "::error::key material committed in the checkout:"; echo "$found"; exit 1; fi
           mkdir -p "$(dirname "$ks")"
-          # Standard Android debug credentials. The key is random, the passwords are
-          # public by design, and the file is discarded with the runner.
-          keytool -genkeypair -v \
-            -keystore "$ks" -storepass android -keypass android \
-            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 30 \
-            -dname "CN=Android Debug, O=Android, C=US"
-          keytool -list -v -keystore "$ks" -storepass android
-          fp=$(keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey \
-               | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$ks"
+          # Standard Android debug credentials: alias androiddebugkey, passwords "android".
+          keytool -list -v -keystore "$ks" -storepass android -alias androiddebugkey | tee keytool.txt
+          fp=$(sed -n 's/^[[:space:]]*SHA256: //p' keytool.txt | tr -d ':' | tr 'A-F' 'a-f')
           test -n "$fp"
           echo "sha256=$fp" >> "$GITHUB_OUTPUT"
-          echo "Generated debug signer certificate SHA-256: $fp"
+          echo "Repository debug signer certificate SHA-256: $fp"
 
       - name: Build debug APK
         if: inputs.debug == true
         run: ./gradlew assembleDebug
 
-      - name: Assert APK is signed by the generated key
+      - name: Assert APK is signed by the repository debug key
         if: inputs.debug == true
         env:
           EXPECTED: ${{ steps.debugkey.outputs.sha256 }}
@@ -151,12 +140,11 @@ jobs:
             echo "::error::expected exactly one signer certificate, found signers=$signers distinct certs=$ndigests"
             exit 1
           fi
-          if [ "$actual" != "$EXPECTED" ]; then echo "::error::APK signer does not match the key generated in this run"; exit 1; fi
+          if [ "$actual" != "$EXPECTED" ]; then echo "::error::APK signer does not match DEBUG_KEYSTORE_BASE64"; exit 1; fi
           {
             echo "### Debug APK signer"
             echo "- APK: \`$(basename "$apk")\`, sha256 \`$(sha256sum "$apk" | cut -d' ' -f1)\`"
-            echo "- Signer certificate SHA-256: \`$actual\`"
-            echo "- Key generated in this run by keytool (see 'Generate throwaway debug key'); it is not retained."
+            echo "- Signer certificate SHA-256: \`$actual\` (repository debug key, secret DEBUG_KEYSTORE_BASE64)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK

@@ -44,9 +44,11 @@ Set-Content -Path docker/certs/corp-root.crt -Value $pem -NoNewline
 
 Copy `docker/release.env.example` to `docker/release.env` (gitignored) and fill in
 `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. Without it the release
-build uses whatever fallback `app/build.gradle.kts` defines. The container prints the
-signer certificate of every APK it produces so you can compare with a GitHub release
-(`apksigner verify --print-certs app-release.apk`).
+build fails in `verifyReleaseSigning`; there is no fallback key. In CI the same four secrets
+come from the *Setup signing keys* workflow (a self-signed placeholder, CN contains
+`PLACEHOLDER`) until the real Google Play key is inserted by hand; see the README's Signing
+section. The container prints the signer certificate of every APK it produces so you can
+compare with a GitHub release (`apksigner verify --print-certs app-release.apk`).
 
 ## What differs from CI
 
